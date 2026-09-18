@@ -1,6 +1,11 @@
 import { expect, test } from "vite-plus/test";
 import { atom } from "./index.ts";
-import { Component, render, type Child } from "suraido.js";
+import {
+  render,
+  type Child,
+  type ComponentContext,
+  type ComponentObject,
+} from "suraido.js";
 import { jsx } from "suraido.js/jsx-runtime";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -26,14 +31,15 @@ test("writing the same value notifies nobody", () => {
 
 test("a watching component redraws when the atom changes", async () => {
   const count = atom(0);
-  class Readout extends Component<{}, {}> {
-    mounted() {
-      this.watch(count);
-    }
-    render(): Child {
+  const Readout: ComponentObject = {
+    mounted(ctx) {
+      ctx.watch(count);
+    },
+    view(): Child {
       return jsx("b", { children: String(count.get()) });
-    }
-  }
+    },
+  };
+
   const host = document.createElement("div");
   render(jsx(Readout, {}), host);
   await tick();
@@ -45,29 +51,28 @@ test("a watching component redraws when the atom changes", async () => {
 });
 
 test("leaving drops the subscription, so the atom lets the component go", async () => {
-  // Without this, every slide ever visited stays subscribed for the life of the deck, and
-  // each write walks the lot of them.
   const count = atom(0);
   let redraws = 0;
 
-  class Readout extends Component<{}, {}> {
-    mounted() {
-      this.watch(count);
-    }
-    render(): Child {
+  const Readout: ComponentObject = {
+    mounted(ctx) {
+      ctx.watch(count);
+    },
+    view(): Child {
       redraws++;
       return jsx("b", { children: String(count.get()) });
-    }
-  }
-  class Host extends Component<{}, { show: boolean }> {
-    state = { show: true };
-    render(): Child {
-      return jsx("div", { children: this.state.show ? jsx(Readout, {}) : null });
-    }
-  }
+    },
+  };
+
+  const Host: ComponentObject<{}, { show: boolean }> = {
+    state: () => ({ show: true }),
+    view(ctx): Child {
+      return jsx("div", { children: ctx.state.show ? jsx(Readout, {}) : null });
+    },
+  };
 
   const el = document.createElement("div");
-  const host = render(jsx(Host, {}), el).comp as Host;
+  const host = render(jsx(Host, {}), el).comp!.context as ComponentContext<{}, { show: boolean }>;
   await tick();
   count.set(1);
   await tick();
