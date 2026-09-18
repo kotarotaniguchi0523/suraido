@@ -1,29 +1,48 @@
-import { Component, flushSync, render, type Child, type VNode } from "./dom.ts";
+import {
+  flushSync,
+  render,
+  type Child,
+  type ComponentContext,
+  type ComponentObject,
+  type VNode,
+} from "./dom.ts";
 import { advance, parseHash, formatHash, LAST, type Pos, type Paths } from "./nav.ts";
 
-/** The base class for a slide. State lives on the class, as usual. */
-export abstract class Slide<P = {}, S = {}> extends Component<P, S> {
-  /**
-   * How many stops this slide has, when you want to say. Left out — which is usually right —
-   * it is counted from the reveals the slide draws.
-   */
-  static steps?: number;
-  /** The name that shows in the URL. Omit it and the index is used. */
-  static path?: string;
-  /** What you want to be reminded of while this slide is up. Read by whatever shows notes. */
-  static notes?: string;
-
-  /** @internal Redrawing itself must number its reveals the same way it did the first time. */
-  $enter = () => {
-    scope.counted = 0;
-  };
-}
-
-export type SlideComponent = (new (props: {}) => Slide<any, any>) & {
+export type SlideMeta = {
+  /** How many stops this slide has. Omit it to derive the count from <Step>. */
   steps?: number;
+  /** The name that shows in the URL. Omit it and the index is used. */
   path?: string;
+  /** What you want to be reminded of while this slide is up. */
   notes?: string;
 };
+
+export type SlideComponent<S = {}> = ComponentObject<{}, S> & SlideMeta;
+
+/**
+ * The common case: immutable slide metadata plus a function that returns JSX.
+ * The result is a plain object; no class or constructor is involved.
+ */
+export function slide(meta: SlideMeta, view: () => Child): SlideComponent {
+  return defineSlide(meta, { view });
+}
+
+/**
+ * The lower-level object form for a slide that needs state or lifecycle.
+ * Still a plain object: the runtime creates the per-mount instance record.
+ */
+export function defineSlide<S = {}>(
+  meta: SlideMeta,
+  definition: Omit<ComponentObject<{}, S>, "enter">,
+): SlideComponent<S> {
+  return {
+    ...definition,
+    ...meta,
+    enter() {
+      scope.counted = 0;
+    },
+  };
+}
 
 /** Where the deck is. */
 export type At = {
@@ -34,79 +53,35 @@ export type At = {
   path: string;
 };
 
-/**
- * What a plugin can learn about a slide without holding the class.
- *
- * How many stops a slide has is not here: it is counted from what the slide drew, so for a
- * slide that has not been on screen yet there is no answer. `At.steps` says it for the one
- * that is.
- */
 export type SlideInfo = {
   path: string;
   notes?: string;
 };
 
-/**
- * What a deck hands to the things attached to it. The whole contract: where it is, what it
- * holds, how to move it, and how to hear about it moving.
- */
 export type DeckContext = {
   readonly at: At;
   readonly slides: readonly SlideInfo[];
-  /** Jump to a path such as "#intro.2", or to a position. */
   go(to: string | { index: number; step?: number }): void;
-  /** One step either way, spilling between slides at the ends. */
   move(by: 1 | -1): void;
-  /** Returns the function that stops listening. */
   on(event: "move", run: (at: At) => void): () => void;
 };
 
-/**
- * Attached with `deck(slides, { use: [...] })`. Returning a function undoes whatever it set
- * up, and the deck calls it on the way out.
- */
 export type Plugin = (deck: DeckContext) => (() => void) | void;
 
-/** How much of the left edge sends you back rather than forward. */
 const BACK_ZONE = 0.25;
 
-/**
- * What the slide currently being built needs to know: which step it is showing, and how far
- * the numbering has got, so a <Step> that was given no number can take the next one.
- *
- * It is set and never restored, which is safe because mount() descends depth-first in document
- * order: a slide's whole subtree is finished before the next SlideAt is reached. That is what
- * lets a single page hold several slides each showing a different amount — which is all that
- * printing and the overview are.
- */
 let scope = { step: 0, counted: 0 };
 
-/**
- * Where a reveal comes in and, if it ever does, where it goes away again.
- *
- * No number means the one after the last, so inserting a reveal does not renumber the ones
- * below it. A number given by hand carries the counting forward from there, so mixing the two
- * stays in order.
- */
 function position(n: number | [number, number] | undefined): [enter: number, until: number] {
   if (n === undefined) return [++scope.counted, Infinity];
   const [enter, until = Infinity] = Array.isArray(n) ? n : [n];
-  // A range counts as reaching the step before it ends, so the next unnumbered reveal lands on
-  // the step it goes away — one press swapping this for that, rather than a blank press between.
   scope.counted = Math.max(scope.counted, Number.isFinite(until) ? until - 1 : enter);
   return [enter, until];
 }
 
 const classes = (...parts: unknown[]) => parts.filter(Boolean).join(" ");
 
-/**
- * The one element a mark can be put on, or nothing when there is not exactly one — bare text,
- * several children, or a component, which may never pass the attributes on to anything.
- */
 function markable(children: Child): VNode | undefined {
-  // Whitespace on the same line survives the JSX transform, so `<Step> <li/> </Step>` arrives
-  // as three children. Counting it would quietly put the wrapper back, and there is no longer
-  // a warning to catch that.
   const real = (Array.isArray(children) ? children : [children]).filter(
     (c) => !(c == null || typeof c === "boolean" || (typeof c === "string" && !c.trim())),
   );
@@ -116,21 +91,12 @@ function markable(children: Child): VNode | undefined {
     : undefined;
 }
 
-/**
- * Transparent until step n is reached, but it keeps its space so nothing shifts.
- * It decides its own state at mount; after that the Deck toggles the attribute.
- *
- * It marks the element you already wrote rather than adding one around it, so a reveal inside
- * a <ul> is still an <li> and `ul > li` goes on matching. Only when there is no single element
- * to mark does it build a div to hold the mark.
- */
 export function Step({
   n,
   class: cls,
   children,
   ...rest
 }: {
-  /** Omit it for the next one. A pair is [comes in, goes away), like Slidev's v-click. */
   n?: number | [number, number];
   class?: string;
   children?: Child;
@@ -151,6 +117,7 @@ export function Step({
       props: { ...target.props, ...mark, class: classes(target.props.class, "step", cls) },
     };
   }
+
   return (
     <div class={classes("step", cls)} {...mark}>
       {children}
@@ -158,18 +125,6 @@ export function Step({
   );
 }
 
-/**
- * Stepping only touches the attribute, never re-rendering, so the CSS transition survives.
- * Scoped to one deck's own stage: another deck on the page is not this deck's business.
- *
- * It also writes the step back, because a slide that redraws itself — a vote coming in, a
- * timer — rebuilds its subtree without passing through SlideAt again, and every <Step> in it
- * would otherwise be built against whatever step was last mounted and come back hidden.
- *
- * ponytail: that write is one value for the page. A slide calling setState while other slides
- * are on screen (printing, overview) would read the wrong one. Give each Slide its own scope
- * if that combination ever has to work.
- */
 function syncSteps(root: ParentNode, step: number) {
   scope.step = step;
   for (const el of root.querySelectorAll<HTMLElement>(".step[data-n]")) {
@@ -178,246 +133,229 @@ function syncSteps(root: ParentNode, step: number) {
   }
 }
 
-/**
- * One slide, shown at one step. The wrapper exists only to say which step, so that <Step>
- * does not have to ask a global what the deck as a whole is doing.
- */
-function SlideAt({ slide: S, step }: { slide: SlideComponent; step: number }) {
+function SlideAt({ slide: current, step }: { slide: SlideComponent; step: number }) {
   scope = { step, counted: 0 };
-  return <S />;
+  const Current = current;
+  return <Current />;
 }
 
 type DeckProps = { slides: SlideComponent[]; width?: number; height?: number };
 
-export class Deck extends Component<DeckProps, { i: number }> {
-  paths: Paths = this.props.slides.map((s) => s.path);
-  /** Counted from what each slide drew, once it has been drawn. */
-  measured: number[] = [];
-  steps = (i: number) => this.props.slides[i]?.steps ?? this.measured[i] ?? 1;
-  /** Where we are. Only a change of slide reaches state and redraws. */
-  pos: Pos = parseHash(location.hash, this.paths);
-  state = { i: this.pos[0] };
+type DeckState = {
+  i: number;
+  paths: Paths;
+  measured: number[];
+  pos: Pos;
+  listeners: Set<(at: At) => void>;
+  teardown: (() => void)[];
+};
 
-  /** This deck's own slide area, so stepping does not reach into anyone else's. */
-  get stage(): ParentNode {
-    const root = this.$el as Element;
-    // Falling back to the deck's own root rather than the document: if the stage is ever not
-    // found, the blast radius stays inside this deck instead of becoming every deck on the page.
-    return root.querySelector(".stage") ?? root;
-  }
+type DeckRuntime = ComponentContext<DeckProps, DeckState>;
 
-  /** How many stops this slide has, counted from what it actually drew. */
-  measure() {
-    const marks = [...this.stage.querySelectorAll<HTMLElement>(".step[data-n]")];
-    // A reveal that goes away again needs the step it goes away on to exist, or it is never
-    // seen gone.
-    const highest = Math.max(
-      0,
-      ...marks.flatMap((el) => [Number(el.dataset.n), Number(el.dataset.until ?? 0)]),
-    );
-    this.measured[this.pos[0]] = highest + 1;
-  }
+const stage = (ctx: DeckRuntime): ParentNode => {
+  const root = ctx.el as Element;
+  return root.querySelector(".stage") ?? root;
+};
 
-  /**
-   * Once the slide is on screen its reveals can be counted, and only then is it known what
-   * "the last step" — or a step in the URL that runs past the end — actually means. So the URL
-   * and everything listening are told here rather than before the slide was drawn.
-   */
-  settle() {
-    this.measure();
-    const [i, step] = this.pos;
-    this.pos = [i, Math.min(step, this.steps(i) - 1)];
-    syncSteps(this.stage, this.pos[1]);
+const steps = (ctx: DeckRuntime, i: number) =>
+  ctx.props.slides[i]?.steps ?? ctx.state.measured[i] ?? 1;
 
-    const hash = formatHash(this.pos, this.paths);
-    if (location.hash !== hash) history.replaceState(null, "", hash);
-    this.announce(this.pos);
-  }
-
-  go = (next: Pos) => {
-    const slideChanged = next[0] !== this.pos[0];
-    // Which way the deck is moving, so the transition can move the same way.
-    // Read it before pos is overwritten.
-    const dir = next[0] > this.pos[0] ? "forward" : "back";
-    this.pos = next;
-
-    // A step on its own is just an attribute.
-    if (!slideChanged) return this.settle();
-
-    // Swap the slide. View Transitions want the DOM change finished inside the callback.
-    const swap = () => {
-      this.setState({ i: next[0] });
-      flushSync();
-      // Inside the swap, not after it: startViewTransition defers the callback, so measuring
-      // outside would read the slide that is still on screen.
-      this.settle();
-    };
-    document.documentElement.dataset.suraidoDir = dir;
-
-    // A browser can refuse to run a transition: a tab that is not visible, or one already
-    // running. The swap is inside the callback, so being refused would leave the deck's
-    // position moved and the slide on screen unchanged, for the rest of the talk.
-    let swapped = false;
-    const once = () => {
-      if (swapped) return;
-      swapped = true;
-      swap();
-    };
-
-    if (!document.startViewTransition) return once();
-    const shift = document.startViewTransition(once);
-    // Nothing waits on these, and "Uncaught (in promise)" is not a diagnosis.
-    shift.ready.catch(() => {});
-    shift.finished.catch(() => {});
-    shift.updateCallbackDone.catch(once);
-  };
-
-  move = (dir: 1 | -1) => this.go(advance(this.pos, dir, this.steps, this.props.slides.length));
-
-  onKey = (e: KeyboardEvent) => {
-    const dir = {
-      ArrowRight: 1,
-      ArrowDown: 1,
-      " ": 1,
-      PageDown: 1,
-      ArrowLeft: -1,
-      ArrowUp: -1,
-      PageUp: -1,
-    }[e.key];
-    if (dir) this.move(dir as 1 | -1);
-    else if (e.key === "Home") this.go([0, 0]);
-    else if (e.key === "End") this.go([this.props.slides.length - 1, LAST]);
-    else if (e.key === "f")
-      void (document.fullscreenElement
-        ? document.exitFullscreen()
-        : document.body.requestFullscreen());
-    else return;
-    e.preventDefault();
-  };
-
-  onHash = () => this.go(parseHash(location.hash, this.paths));
-
-  /**
-   * Tapping the left edge goes back, anywhere else goes forward. A phone has no shift key, so
-   * without a zone a touch deck could only ever move one way.
-   *
-   * Anything you could have meant to press is left alone, so a link or a button in a slide
-   * does not also turn the page.
-   */
-  onClick = (e: MouseEvent) => {
-    const target = e.target as Element | null;
-    if (target?.closest("a, button, input, select, textarea, label, [data-suraido-keep]")) return;
-    const back = e.shiftKey || e.clientX < innerWidth * BACK_ZONE;
-    this.move(back ? -1 : 1);
-  };
-
-  /** The scale is a variable on :root, so it drags in neither a re-render nor a swap. */
-  fit = () => {
-    const { width = 1920, height = 1080 } = this.props;
-    const scale = Math.min(innerWidth / width, innerHeight / height);
-    document.documentElement.style.setProperty("--suraido-scale", String(scale));
-  };
-
-  mounted() {
-    addEventListener("keydown", this.onKey);
-    addEventListener("hashchange", this.onHash);
-    addEventListener("resize", this.fit);
-    this.fit();
-    // Normalise the URL and match the attributes to it, rounding an out-of-range step.
-    this.go(this.pos);
-  }
-
-  /** @internal */ listeners = new Set<(at: At) => void>();
-  /** @internal */ teardown: (() => void)[] = [];
-
-  /** @internal */ snapshot([i, step]: Pos = this.pos): At {
-    return {
-      index: i,
-      step,
-      steps: this.steps(i),
-      total: this.props.slides.length,
-      path: formatHash([i, step], this.paths),
-    };
-  }
-
-  announce(next: Pos) {
-    const at = this.snapshot(next);
-    // Same reason as the atom: a listener that attaches another one mid-notification would
-    // otherwise see it run in the same pass. Notify the set as it stood.
-    // oxlint-disable-next-line no-useless-spread -- the copy is the point
-    for (const run of [...this.listeners]) run(at);
-  }
-
-  unmounted() {
-    // Reverse of the order they were attached, so a plugin unwinds after anything it set up.
-    for (const off of this.teardown.reverse()) off();
-    this.teardown.length = 0;
-    this.listeners.clear();
-    removeEventListener("keydown", this.onKey);
-    removeEventListener("hashchange", this.onHash);
-    removeEventListener("resize", this.fit);
-  }
-
-  render() {
-    const { slides, width = 1920, height = 1080 } = this.props;
-    const Current = slides[this.state.i];
-
-    return (
-      <div class="deck" onClick={this.onClick}>
-        <div class="stage" style={{ width: `${width}px`, height: `${height}px` }}>
-          {/* The step goes in with the slide so a deep link that carries one is honoured from
-              the very first render. Drop it and reveals are missing on exactly those links. */}
-          <SlideAt slide={Current} step={this.pos[1]} />
-        </div>
-        <div class="pager">{`${this.state.i + 1} / ${slides.length}`}</div>
-      </div>
-    );
-  }
+function measure(ctx: DeckRuntime) {
+  const marks = [...stage(ctx).querySelectorAll<HTMLElement>(".step[data-n]")];
+  const highest = Math.max(
+    0,
+    ...marks.flatMap((el) => [Number(el.dataset.n), Number(el.dataset.until ?? 0)]),
+  );
+  ctx.state.measured[ctx.state.pos[0]] = highest + 1;
 }
 
+function snapshot(ctx: DeckRuntime, [i, step]: Pos = ctx.state.pos): At {
+  return {
+    index: i,
+    step,
+    steps: steps(ctx, i),
+    total: ctx.props.slides.length,
+    path: formatHash([i, step], ctx.state.paths),
+  };
+}
+
+function announce(ctx: DeckRuntime, next: Pos) {
+  const at = snapshot(ctx, next);
+  for (const run of [...ctx.state.listeners]) run(at);
+}
+
+function settle(ctx: DeckRuntime) {
+  measure(ctx);
+  const [i, step] = ctx.state.pos;
+  ctx.state.pos = [i, Math.min(step, steps(ctx, i) - 1)];
+  syncSteps(stage(ctx), ctx.state.pos[1]);
+
+  const hash = formatHash(ctx.state.pos, ctx.state.paths);
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  announce(ctx, ctx.state.pos);
+}
+
+function go(ctx: DeckRuntime, next: Pos) {
+  const slideChanged = next[0] !== ctx.state.pos[0];
+  const dir = next[0] > ctx.state.pos[0] ? "forward" : "back";
+  ctx.state.pos = next;
+
+  if (!slideChanged) {
+    settle(ctx);
+    return;
+  }
+
+  const swap = () => {
+    ctx.setState({ i: next[0] });
+    flushSync();
+    settle(ctx);
+  };
+
+  document.documentElement.dataset.suraidoDir = dir;
+
+  let swapped = false;
+  const once = () => {
+    if (swapped) return;
+    swapped = true;
+    swap();
+  };
+
+  if (!document.startViewTransition) {
+    once();
+    return;
+  }
+
+  const shift = document.startViewTransition(once);
+  shift.ready.catch(() => {});
+  shift.finished.catch(() => {});
+  shift.updateCallbackDone.catch(once);
+}
+
+function move(ctx: DeckRuntime, dir: 1 | -1) {
+  go(ctx, advance(ctx.state.pos, dir, (i) => steps(ctx, i), ctx.props.slides.length));
+}
+
+export const Deck: ComponentObject<DeckProps, DeckState> = {
+  state(props) {
+    const paths = props.slides.map((s) => s.path);
+    const pos = parseHash(location.hash, paths);
+    return {
+      i: pos[0],
+      paths,
+      measured: [],
+      pos,
+      listeners: new Set(),
+      teardown: [],
+    };
+  },
+
+  mounted(ctx) {
+    const onKey = (e: KeyboardEvent) => {
+      const dir = {
+        ArrowRight: 1,
+        ArrowDown: 1,
+        " ": 1,
+        PageDown: 1,
+        ArrowLeft: -1,
+        ArrowUp: -1,
+        PageUp: -1,
+      }[e.key];
+
+      if (dir) move(ctx, dir as 1 | -1);
+      else if (e.key === "Home") go(ctx, [0, 0]);
+      else if (e.key === "End") go(ctx, [ctx.props.slides.length - 1, LAST]);
+      else if (e.key === "f") {
+        void (document.fullscreenElement
+          ? document.exitFullscreen()
+          : document.body.requestFullscreen());
+      } else {
+        return;
+      }
+      e.preventDefault();
+    };
+
+    const onHash = () => go(ctx, parseHash(location.hash, ctx.state.paths));
+    const fit = () => {
+      const { width = 1920, height = 1080 } = ctx.props;
+      const scale = Math.min(innerWidth / width, innerHeight / height);
+      document.documentElement.style.setProperty("--suraido-scale", String(scale));
+    };
+
+    addEventListener("keydown", onKey);
+    addEventListener("hashchange", onHash);
+    addEventListener("resize", fit);
+    fit();
+    go(ctx, ctx.state.pos);
+
+    return () => {
+      for (const off of ctx.state.teardown.reverse()) off();
+      ctx.state.teardown.length = 0;
+      ctx.state.listeners.clear();
+      removeEventListener("keydown", onKey);
+      removeEventListener("hashchange", onHash);
+      removeEventListener("resize", fit);
+    };
+  },
+
+  view(ctx) {
+    const { slides, width = 1920, height = 1080 } = ctx.props;
+    const Current = slides[ctx.state.i];
+
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as Element | null;
+      if (target?.closest("a, button, input, select, textarea, label, [data-suraido-keep]")) {
+        return;
+      }
+      const back = e.shiftKey || e.clientX < innerWidth * BACK_ZONE;
+      move(ctx, back ? -1 : 1);
+    };
+
+    return (
+      <div class="deck" onClick={onClick}>
+        <div class="stage" style={{ width: `${width}px`, height: `${height}px` }}>
+          <SlideAt slide={Current} step={ctx.state.pos[1]} />
+        </div>
+        <div class="pager">{`${ctx.state.i + 1} / ${slides.length}`}</div>
+      </div>
+    );
+  },
+};
+
 export type DeckOptions = Omit<DeckProps, "slides"> & {
-  /** Things attached to this deck — the presenter view, sync, anything. */
   use?: Plugin[];
 };
 
-/**
- * Starts a deck. It mounts into #root, or makes a container on body if there is none.
- *
- * Whatever is in `use` is handed the deck and can move it, read it and hear about it. The
- * context is returned as well, for a test or for reaching in from elsewhere.
- */
 export function deck(slides: SlideComponent[], { use = [], ...opts }: DeckOptions = {}) {
   const host =
     document.getElementById("root") ?? document.body.appendChild(document.createElement("div"));
   const mounted = render(<Deck slides={slides} {...opts} />, host);
-  const self = mounted.comp as Deck;
+  const self = mounted.comp?.context as DeckRuntime;
 
   const context: DeckContext = {
     get at() {
-      return self.snapshot();
+      return snapshot(self);
     },
     get slides() {
-      return slides.map((slide, i) => ({
-        path: formatHash([i, 0], self.paths),
-        notes: slide.notes,
+      return slides.map((item, i) => ({
+        path: formatHash([i, 0], self.state.paths),
+        notes: item.notes,
       }));
     },
     go(to) {
-      self.go(typeof to === "string" ? parseHash(to, self.paths) : [to.index, to.step ?? 0]);
+      go(self, typeof to === "string" ? parseHash(to, self.state.paths) : [to.index, to.step ?? 0]);
     },
     move(by) {
-      self.move(by);
+      move(self, by);
     },
     on(_event, run) {
-      self.listeners.add(run);
-      return () => self.listeners.delete(run);
+      self.state.listeners.add(run);
+      return () => self.state.listeners.delete(run);
     },
   };
 
-  // Before mounted() runs — it normalises the URL, and a plugin should hear that too.
   for (const plugin of use) {
     const off = plugin(context);
-    if (off) self.teardown.push(off);
+    if (off) self.state.teardown.push(off);
   }
 
   return context;
