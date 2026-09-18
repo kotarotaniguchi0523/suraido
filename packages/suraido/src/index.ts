@@ -1,4 +1,4 @@
-export { flushSync, render } from "./dom.ts";
+export { dispose, flushSync, render } from "./dom.ts";
 export type {
   VNode,
   Child,
