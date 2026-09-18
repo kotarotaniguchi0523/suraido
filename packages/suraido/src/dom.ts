@@ -226,3 +226,8 @@ export function render(v: Child, container: Element) {
   container.replaceChildren(domOf(inst));
   return inst;
 }
+
+/** Runs lifecycle cleanup for a mounted tree. */
+export function dispose(inst: Inst) {
+  unmount(inst);
+}
