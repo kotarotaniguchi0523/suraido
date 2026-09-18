@@ -1,4 +1,5 @@
 import {
+  dispose,
   flushSync,
   render,
   type Child,
@@ -64,6 +65,8 @@ export type DeckContext = {
   go(to: string | { index: number; step?: number }): void;
   move(by: 1 | -1): void;
   on(event: "move", run: (at: At) => void): () => void;
+  /** Unmount the deck and release its listeners/plugins. */
+  destroy(): void;
 };
 
 export type Plugin = (deck: DeckContext) => (() => void) | void;
@@ -350,6 +353,10 @@ export function deck(slides: SlideComponent[], { use = [], ...opts }: DeckOption
     on(_event, run) {
       self.state.listeners.add(run);
       return () => self.state.listeners.delete(run);
+    },
+    destroy() {
+      dispose(mounted);
+      host.replaceChildren();
     },
   };
 
