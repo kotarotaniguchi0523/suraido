@@ -1,5 +1,10 @@
 import { expect, test } from "vite-plus/test";
-import { Component, render, type Child } from "./dom.ts";
+import {
+  render,
+  type Child,
+  type ComponentContext,
+  type ComponentObject,
+} from "./dom.ts";
 import { jsx } from "./jsx-runtime.ts";
 
 const h = (type: any, props: Record<string, any> = {}, ...kids: any[]) =>
@@ -8,22 +13,26 @@ const h = (type: any, props: Record<string, any> = {}, ...kids: any[]) =>
 const root = () => document.createElement("div");
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-class Box extends Component<{ label: string }, { n: number }> {
-  state = { n: 0 };
-  render(): Child {
+type BoxState = { n: number };
+const Box: ComponentObject<{ label: string }, BoxState> = {
+  state: () => ({ n: 0 }),
+  view(ctx): Child {
     return h(
       "div",
       {},
       h("img", { src: "/cat.png" }),
-      h("span", {}, `${this.props.label}:${this.state.n}`),
-      this.state.n > 0 ? h("p", {}, "extra") : null,
+      h("span", {}, `${ctx.props.label}:${ctx.state.n}`),
+      ctx.state.n > 0 ? h("p", {}, "extra") : null,
     );
-  }
-}
+  },
+};
 
 test("setState re-renders the subtree", async () => {
   const el = root();
-  const box = render(h(Box, { label: "a" }), el).comp as Box;
+  const box = render(h(Box, { label: "a" }), el).comp!.context as ComponentContext<
+    { label: string },
+    BoxState
+  >;
   expect(el.querySelector("span")!.textContent).toBe("a:0");
 
   box.setState({ n: 1 });
@@ -32,10 +41,11 @@ test("setState re-renders the subtree", async () => {
 });
 
 test("setState rebuilds nodes rather than diffing them", async () => {
-  // A deliberate trade. Anything that needs DOM identity — video, input, a transition in
-  // flight — does not belong on a slide that calls setState. Bring diffing back if it must.
   const el = root();
-  const box = render(h(Box, { label: "a" }), el).comp as Box;
+  const box = render(h(Box, { label: "a" }), el).comp!.context as ComponentContext<
+    { label: string },
+    BoxState
+  >;
   const img = el.querySelector("img");
 
   box.setState({ n: 1 });
@@ -45,7 +55,10 @@ test("setState rebuilds nodes rather than diffing them", async () => {
 
 test("a child can appear and disappear without disturbing its siblings", async () => {
   const el = root();
-  const box = render(h(Box, { label: "a" }), el).comp as Box;
+  const box = render(h(Box, { label: "a" }), el).comp!.context as ComponentContext<
+    { label: string },
+    BoxState
+  >;
   expect(el.querySelector("p")).toBe(null);
 
   box.setState({ n: 1 });
@@ -60,23 +73,23 @@ test("a child can appear and disappear without disturbing its siblings", async (
 });
 
 test("handlers survive the rebuild they caused, and do not stack", async () => {
-  class Counter extends Component<{}, { n: number }> {
-    state = { n: 0 };
-    render(): Child {
+  const Counter: ComponentObject<{}, { n: number }> = {
+    state: () => ({ n: 0 }),
+    view(ctx): Child {
       return h(
         "button",
-        { onClick: () => this.setState((s) => ({ n: s.n + 1 })) },
-        String(this.state.n),
+        { onClick: () => ctx.setState((s) => ({ n: s.n + 1 })) },
+        String(ctx.state.n),
       );
-    }
-  }
+    },
+  };
+
   const el = root();
   render(h(Counter, {}), el);
   for (let i = 0; i < 3; i++) {
     el.querySelector("button")!.dispatchEvent(new Event("click"));
     await tick();
   }
-  // Rebuilt every time, yet it counts the presses. Doubled listeners would reach 7.
   expect(el.querySelector("button")!.textContent).toBe("3");
 });
 
@@ -97,18 +110,19 @@ test("lists shrink correctly and dropped props are gone", () => {
 test("updated() fires after the DOM has been rebuilt, so focus can be restored", async () => {
   const el = root();
   const seen: string[] = [];
-  class Form extends Component<{}, { n: number }> {
-    state = { n: 0 };
+
+  const Form: ComponentObject<{}, { n: number }> = {
+    state: () => ({ n: 0 }),
     updated() {
-      // the new DOM must already be in place by now
       seen.push(el.querySelector("span")!.textContent!);
-    }
-    render(): Child {
-      return h("div", {}, h("input", {}), h("span", {}, String(this.state.n)));
-    }
-  }
-  const form = render(h(Form, {}), el).comp as Form;
-  expect(seen).toEqual([]); // not called on the first mount
+    },
+    view(ctx): Child {
+      return h("div", {}, h("input", {}), h("span", {}, String(ctx.state.n)));
+    },
+  };
+
+  const form = render(h(Form, {}), el).comp!.context as ComponentContext<{}, { n: number }>;
+  expect(seen).toEqual([]);
 
   form.setState({ n: 1 });
   await tick();
@@ -122,24 +136,27 @@ test("updated() fires after the DOM has been rebuilt, so focus can be restored",
 test("unmounted() fires when a component leaves the tree", async () => {
   const el = root();
   const log: string[] = [];
-  class Timer extends Component<{}, {}> {
+
+  const Timer: ComponentObject = {
     mounted() {
       log.push("in");
-    }
+    },
     unmounted() {
       log.push("out");
-    }
-    render(): Child {
+    },
+    view(): Child {
       return h("i", {}, "tick");
-    }
-  }
-  class Host extends Component<{}, { show: boolean }> {
-    state = { show: true };
-    render(): Child {
-      return h("div", {}, this.state.show ? h(Timer, {}) : null);
-    }
-  }
-  const host = render(h(Host, {}), el).comp as Host;
+    },
+  };
+
+  const Host: ComponentObject<{}, { show: boolean }> = {
+    state: () => ({ show: true }),
+    view(ctx): Child {
+      return h("div", {}, ctx.state.show ? h(Timer, {}) : null);
+    },
+  };
+
+  const host = render(h(Host, {}), el).comp!.context as ComponentContext<{}, { show: boolean }>;
   await tick();
   expect(log).toEqual(["in"]);
 
