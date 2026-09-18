@@ -4,8 +4,7 @@ async function mountDeck(hash: string, kind: "points" | "list" = "points") {
   location.hash = hash;
   vi.resetModules();
 
-  const { slide, Step, Deck } = await import("./deck.tsx");
-  const { render } = await import("./dom.ts");
+  const { slide, Step, deck } = await import("./deck.tsx");
   const { jsx } = await import("./jsx-runtime.ts");
 
   const Points = slide({ path: "points", steps: 3 }, () =>
@@ -22,13 +21,14 @@ async function mountDeck(hash: string, kind: "points" | "list" = "points") {
   );
 
   const host = document.createElement("div");
-  render(jsx(Deck, { slides: [kind === "list" ? List : Points] }), host);
+  const context = deck([kind === "list" ? List : Points], { host });
   await new Promise((r) => setTimeout(r, 0));
-  return {
-    host,
+  const result = {
     shown: [...host.querySelectorAll(".step")].map((e) => e.hasAttribute("data-shown")),
     hash: location.hash,
   };
+  context.destroy();
+  return result;
 }
 
 test("opening #points.2 from cold shows step 2 from the first render", async () => {
