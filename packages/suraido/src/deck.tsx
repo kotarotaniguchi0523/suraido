@@ -18,7 +18,7 @@ export type SlideMeta = {
   notes?: string;
 };
 
-export type SlideComponent<S = {}> = ComponentObject<{}, S> & SlideMeta;
+export type SlideComponent = ComponentObject<{}, any> & SlideMeta;
 
 /**
  * The common case: immutable slide metadata plus a function that returns JSX.
@@ -35,7 +35,7 @@ export function slide(meta: SlideMeta, view: () => Child): SlideComponent {
 export function defineSlide<S = {}>(
   meta: SlideMeta,
   definition: Omit<ComponentObject<{}, S>, "enter">,
-): SlideComponent<S> {
+): SlideComponent {
   return {
     ...definition,
     ...meta,
