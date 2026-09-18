@@ -1,5 +1,5 @@
 /**
- * A minimal JSX runtime: vnodes into DOM, and class components that hold state.
+ * A minimal JSX runtime: vnodes into DOM, and plain component objects with per-mount state.
  * There is no diffing. setState rebuilds that subtree outright.
  */
 
@@ -9,8 +9,43 @@ export type Child = VNode | string | number | null | undefined | boolean | Child
 export const Fragment = Symbol.for("jsx.fragment");
 const SVG = "http://www.w3.org/2000/svg";
 
-/** What was built, and which component built it. */
-type Inst = { dom?: Node; comp?: Component<any, any>; kids: Inst[] };
+type Source = { subscribe(run: () => void): () => void };
+
+export type ComponentContext<P = {}, S = {}> = {
+  readonly props: P;
+  readonly state: S;
+  /** The root DOM node built by this component. Valid once it has mounted. */
+  readonly el: Node;
+  setState(patch: Partial<S> | ((state: S) => Partial<S>)): void;
+  /** Redraw whenever any source changes; subscriptions are dropped on unmount. */
+  watch(...sources: Source[]): void;
+};
+
+export type ComponentObject<P = {}, S = {}> = {
+  /** Fresh state for each mount. Omit it for a stateless component. */
+  state?: (props: P) => S;
+  view(context: ComponentContext<P, S>): Child;
+  mounted?(context: ComponentContext<P, S>): void | (() => void);
+  updated?(context: ComponentContext<P, S>): void;
+  unmounted?(context: ComponentContext<P, S>): void;
+  /** @internal Runs just before this component's subtree is rebuilt. */
+  enter?(context: ComponentContext<P, S>): void;
+};
+
+/** What was built, and which component object built it. */
+export type Inst = { dom?: Node; comp?: ComponentInstance<any, any>; kids: Inst[] };
+
+export type ComponentInstance<P = {}, S = {}> = {
+  definition: ComponentObject<P, S>;
+  props: P;
+  state: S;
+  context: ComponentContext<P, S>;
+  inst: Inst;
+  ns: string | null;
+  dead: boolean;
+  unwatch: (() => void)[];
+  cleanup?: () => void;
+};
 
 const domOf = (i: Inst): Node => i.dom ?? domOf(i.kids[0]);
 
@@ -35,27 +70,75 @@ function flatten(c: Child, out: (VNode | string)[] = []): (VNode | string)[] {
 /** A component's return value is treated as a single root. */
 const one = (c: Child) => flatten(c)[0] ?? "";
 
-/*
- * instanceof Component breaks when suraido.js is loaded twice — two copies in the dependency
- * tree make them different classes. Looking for prototype.render does not care.
- * A function component has no prototype.render, so nothing is mistaken for a class.
- */
-const isClass = (t: unknown): t is new (p: any) => Component<any, any> =>
-  typeof t === "function" && typeof (t as any).prototype?.render === "function";
+const isComponentObject = (value: unknown): value is ComponentObject<any, any> =>
+  typeof value === "object" && value !== null && typeof (value as any).view === "function";
+
+const dirty = new Set<ComponentInstance<any, any>>();
+
+function schedule(instance: ComponentInstance<any, any>) {
+  if (dirty.size === 0) queueMicrotask(flush);
+  dirty.add(instance);
+}
+
+function createComponent<P, S>(
+  definition: ComponentObject<P, S>,
+  props: P,
+  ns: string | null,
+): ComponentInstance<P, S> {
+  const instance = {
+    definition,
+    props,
+    state: definition.state?.(props) ?? ({} as S),
+    context: undefined as unknown as ComponentContext<P, S>,
+    inst: undefined as unknown as Inst,
+    ns,
+    dead: false,
+    unwatch: [],
+  } satisfies ComponentInstance<P, S>;
+
+  instance.context = {
+    get props() {
+      return instance.props;
+    },
+    get state() {
+      return instance.state;
+    },
+    get el() {
+      return domOf(instance.inst);
+    },
+    setState(patch) {
+      instance.state = {
+        ...instance.state,
+        ...(typeof patch === "function" ? patch(instance.state) : patch),
+      };
+      schedule(instance);
+    },
+    watch(...sources) {
+      for (const source of sources) {
+        instance.unwatch.push(source.subscribe(() => schedule(instance)));
+      }
+    },
+  };
+
+  return instance;
+}
 
 function mount(v: VNode | string, ns: string | null): Inst {
   if (typeof v === "string") return { dom: document.createTextNode(v), kids: [] };
 
   const { type, props } = v;
-  if (isClass(type)) {
-    const comp = new type(props);
+  if (isComponentObject(type)) {
+    const comp = createComponent(type, props, ns);
     const inst: Inst = { comp, kids: [] };
-    comp.$inst = inst;
-    comp.$ns = ns;
-    inst.kids = [mount(one(comp.render()), ns)];
-    queueMicrotask(() => comp.$dead || comp.mounted());
+    comp.inst = inst;
+    inst.kids = [mount(one(type.view(comp.context)), ns)];
+    queueMicrotask(() => {
+      if (comp.dead) return;
+      comp.cleanup = type.mounted?.(comp.context) || undefined;
+    });
     return inst;
   }
+
   if (typeof type === "function") {
     const inst: Inst = { kids: [] };
     inst.kids = [mount(one((type as (p: any) => Child)(props)), ns)];
@@ -78,10 +161,13 @@ function mount(v: VNode | string, ns: string | null): Inst {
 
 function unmount(inst: Inst) {
   if (inst.comp) {
-    inst.comp.$dead = true;
-    for (const off of inst.comp.$unwatch) off();
-    inst.comp.$unwatch.length = 0;
-    inst.comp.unmounted();
+    const comp = inst.comp;
+    comp.dead = true;
+    for (const off of comp.unwatch) off();
+    comp.unwatch.length = 0;
+    comp.cleanup?.();
+    comp.cleanup = undefined;
+    comp.definition.unmounted?.(comp.context);
   }
   for (const k of inst.kids) unmount(k);
 }
@@ -105,78 +191,26 @@ function setProp(el: any, k: string, v: unknown) {
   } else if (typeof v === "string" || typeof v === "number") {
     el.setAttribute(k, String(v));
   } else {
-    // null, false and anything else carry no meaning as an attribute.
-    // Passing them through String() would write [object Object] into it.
     el.removeAttribute(k);
   }
 }
 
-const dirty = new Set<Component<any, any>>();
-
 function flush() {
   const pending = [...dirty];
   dirty.clear();
-  for (const c of pending) {
-    if (c.$dead) continue;
-    // Nothing is diffed: rebuild this subtree and swap it in.
-    const prev = c.$inst.kids[0];
-    // Put back whatever scope this subtree was first built in. A rebuild does not pass through
-    // whoever set that up the first time, so without this it inherits the last one used.
-    c.$enter?.();
-    const fresh = mount(one(c.render()), c.$ns);
+
+  for (const comp of pending) {
+    if (comp.dead) continue;
+
+    const prev = comp.inst.kids[0];
+    comp.definition.enter?.(comp.context);
+    const fresh = mount(one(comp.definition.view(comp.context)), comp.ns);
     const gone = domOf(prev);
     gone.parentNode!.replaceChild(domOf(fresh), gone);
     unmount(prev);
-    c.$inst.kids = [fresh];
-    c.updated();
+    comp.inst.kids = [fresh];
+    comp.definition.updated?.(comp.context);
   }
-}
-
-export abstract class Component<P = {}, S = {}> {
-  props: P;
-  state: S = {} as S;
-  /** @internal */ $inst!: Inst;
-  /** @internal The element this component built, for the rare job that needs to scope a query
-   * to one component's own subtree rather than the whole document. Valid once mounted. */
-  get $el(): Node {
-    return domOf(this.$inst);
-  }
-  /** @internal */ $ns: string | null = null;
-  /** @internal */ $dead = false;
-  /** @internal */ $unwatch: (() => void)[] = [];
-  /** @internal Runs just before this component's subtree is rebuilt. */
-  $enter?: () => void;
-
-  constructor(props: P) {
-    this.props = props;
-  }
-
-  setState(patch: Partial<S> | ((s: S) => Partial<S>)) {
-    this.state = { ...this.state, ...(typeof patch === "function" ? patch(this.state) : patch) };
-    if (dirty.size === 0) queueMicrotask(flush);
-    dirty.add(this);
-  }
-
-  /**
-   * Redraw this component whenever one of these atoms changes.
-   *
-   * The subscriptions are dropped when the component leaves, so a slide you have moved on from
-   * stops being redrawn — and the atom stops holding on to it.
-   */
-  watch(...atoms: { subscribe(run: () => void): () => void }[]) {
-    for (const source of atoms) {
-      this.$unwatch.push(source.subscribe(() => this.setState({} as Partial<S>)));
-    }
-  }
-
-  mounted() {}
-  /**
-   * Runs right after a re-render has rebuilt the DOM.
-   * The place to put back focus, scroll position and anything else the DOM alone held.
-   */
-  updated() {}
-  unmounted() {}
-  abstract render(): Child;
 }
 
 /**
