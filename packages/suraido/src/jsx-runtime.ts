@@ -1,4 +1,4 @@
-import type { Child, VNode } from "./dom.ts";
+import type { Child, ComponentObject, VNode } from "./dom.ts";
 export { Fragment } from "./dom.ts";
 
 export const jsx = (type: unknown, props: Record<string, any>, key: unknown = null): VNode => ({
@@ -9,7 +9,6 @@ export const jsx = (type: unknown, props: Record<string, any>, key: unknown = nu
 export const jsxs = jsx;
 export const jsxDEV = jsx;
 
-/** Attributes go straight to the DOM. Not React: `class`, and `onClick` means a `click` listener. */
 type Attrs = { [K in `on${string}`]?: (e: any) => void } & {
   class?: string;
   style?: string | Partial<CSSStyleDeclaration>;
@@ -19,16 +18,7 @@ type Attrs = { [K in `on${string}`]?: (e: any) => void } & {
 
 export namespace JSX {
   export type Element = VNode;
-  export type ElementType =
-    | string
-    | ((props: any) => Child)
-    | (new (props: any) => { render(): Child });
-  export interface ElementClass {
-    render(): Child;
-  }
-  export interface ElementAttributesProperty {
-    props: unknown;
-  }
+  export type ElementType = string | ((props: any) => Child) | ComponentObject<any, any>;
   export interface ElementChildrenAttribute {
     children: unknown;
   }
