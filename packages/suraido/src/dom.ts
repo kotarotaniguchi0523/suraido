@@ -85,7 +85,7 @@ function createComponent<P, S>(
   props: P,
   ns: string | null,
 ): ComponentInstance<P, S> {
-  const instance = {
+  const instance: ComponentInstance<P, S> = {
     definition,
     props,
     state: definition.state?.(props) ?? ({} as S),
@@ -94,7 +94,7 @@ function createComponent<P, S>(
     ns,
     dead: false,
     unwatch: [],
-  } satisfies ComponentInstance<P, S>;
+  };
 
   instance.context = {
     get props() {
