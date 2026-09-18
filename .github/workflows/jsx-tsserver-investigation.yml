@@ -1,0 +1,195 @@
+name: JSX language-service investigation
+
+on:
+  push:
+    branches: [investigate/jsx-tsserver]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout harness branch
+        uses: actions/checkout@v4
+
+      - name: Use Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Write language-service checker
+        shell: bash
+        run: |
+          cat > /tmp/ls-check.mjs <<'EOF'
+          import fs from "node:fs";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const projectDir = path.resolve(process.argv[2]);
+          const configPath = path.resolve(process.argv[3] ?? path.join(projectDir, "tsconfig.json"));
+          const tsPath = path.join(projectDir, "node_modules/typescript/lib/typescript.js");
+          const ts = (await import(pathToFileURL(tsPath).href)).default;
+
+          const read = ts.readConfigFile(configPath, ts.sys.readFile);
+          if (read.error) {
+            console.log("CONFIG_ERROR", ts.flattenDiagnosticMessageText(read.error.messageText, "\n"));
+            process.exitCode = 1;
+            process.exit();
+          }
+          const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, path.dirname(configPath), undefined, configPath);
+
+          const versions = new Map(parsed.fileNames.map((f) => [path.normalize(f), "0"]));
+          const host = {
+            getCompilationSettings: () => parsed.options,
+            getScriptFileNames: () => parsed.fileNames,
+            getScriptVersion: (f) => versions.get(path.normalize(f)) ?? "0",
+            getScriptSnapshot: (f) => {
+              if (!fs.existsSync(f)) return undefined;
+              return ts.ScriptSnapshot.fromString(fs.readFileSync(f, "utf8"));
+            },
+            getCurrentDirectory: () => projectDir,
+            getDefaultLibFileName: (opts) => ts.getDefaultLibFilePath(opts),
+            fileExists: ts.sys.fileExists,
+            readFile: ts.sys.readFile,
+            readDirectory: ts.sys.readDirectory,
+            directoryExists: ts.sys.directoryExists,
+            getDirectories: ts.sys.getDirectories,
+            realpath: ts.sys.realpath,
+          };
+
+          const ls = ts.createLanguageService(host, ts.createDocumentRegistry());
+          let count = 0;
+          for (const file of parsed.fileNames.filter((f) => /\.(tsx|ts)$/.test(f))) {
+            const diagnostics = [
+              ...ls.getSyntacticDiagnostics(file),
+              ...ls.getSemanticDiagnostics(file),
+            ];
+            if (!diagnostics.length) continue;
+            console.log("\nFILE", path.relative(projectDir, file));
+            for (const d of diagnostics) {
+              count++;
+              const pos = d.start == null ? "" : (() => {
+                const sf = ls.getProgram()?.getSourceFile(file);
+                if (!sf) return "";
+                const lc = sf.getLineAndCharacterOfPosition(d.start);
+                return `${lc.line + 1}:${lc.character + 1}`;
+              })();
+              console.log(`TS${d.code} ${pos} ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
+            }
+          }
+          console.log("\nLANGUAGE_SERVICE_DIAGNOSTICS", count);
+          if (count) process.exitCode = 2;
+          EOF
+
+      - name: Checkout current upstream Suraido
+        uses: actions/checkout@v4
+        with:
+          repository: L4Ph/suraido
+          ref: main
+          path: upstream
+          fetch-depth: 1
+
+      - name: Monorepo example before package build
+        shell: bash
+        continue-on-error: true
+        run: |
+          cd upstream
+          npm install --ignore-scripts
+          echo "=== tsc before suraido dist exists ==="
+          npx tsc -p examples/basic/tsconfig.json --noEmit --pretty false
+          echo "=== language service before suraido dist exists ==="
+          node /tmp/ls-check.mjs "$(pwd)" "$(pwd)/examples/basic/tsconfig.json"
+
+      - name: Monorepo example after package build
+        shell: bash
+        run: |
+          cd upstream
+          npx vp -C packages/suraido pack
+          echo "=== tsc after suraido package build ==="
+          npx tsc -p examples/basic/tsconfig.json --noEmit --pretty false
+          echo "=== language service after suraido package build ==="
+          node /tmp/ls-check.mjs "$(pwd)" "$(pwd)/examples/basic/tsconfig.json"
+
+      - name: Published create-suraido scaffold
+        shell: bash
+        run: |
+          rm -rf /tmp/suraido-published
+          cd /tmp
+          npx --yes create-suraido@latest suraido-published --name suraido-published --theme olivia
+          cd /tmp/suraido-published
+          npm install
+          echo "=== published scaffold tsc ==="
+          npx tsc -p tsconfig.json --noEmit --pretty false
+          echo "=== published scaffold language service ==="
+          node /tmp/ls-check.mjs "$(pwd)" "$(pwd)/tsconfig.json"
+
+      - name: Published Hono JSX project
+        shell: bash
+        run: |
+          rm -rf /tmp/hono-jsx
+          mkdir -p /tmp/hono-jsx/src
+          cd /tmp/hono-jsx
+          cat > package.json <<'EOF'
+          {
+            "name": "hono-jsx-check",
+            "private": true,
+            "type": "module",
+            "dependencies": {
+              "hono": "latest"
+            },
+            "devDependencies": {
+              "typescript": "^5.9.0"
+            }
+          }
+          EOF
+          cat > tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "ES2022",
+              "module": "ESNext",
+              "moduleResolution": "Bundler",
+              "strict": true,
+              "noEmit": true,
+              "jsx": "react-jsx",
+              "jsxImportSource": "hono/jsx"
+            },
+            "include": ["src"]
+          }
+          EOF
+          cat > src/index.tsx <<'EOF'
+          import { Hono } from "hono";
+          import type { FC } from "hono/jsx";
+
+          const Layout: FC<{ children?: unknown }> = (props) => (
+            <html>
+              <body class="page">{props.children as any}</body>
+            </html>
+          );
+
+          const app = new Hono();
+          app.get("/", (c) => c.html(<Layout><h1 data-kind="ok">Hello</h1></Layout>));
+          export default app;
+          EOF
+          npm install
+          echo "=== Hono tsc ==="
+          npx tsc -p tsconfig.json --noEmit --pretty false
+          echo "=== Hono language service ==="
+          node /tmp/ls-check.mjs "$(pwd)" "$(pwd)/tsconfig.json"
+
+      - name: Suraido without jsxImportSource control
+        shell: bash
+        continue-on-error: true
+        run: |
+          cd /tmp/suraido-published
+          node - <<'NODE'
+          const fs = require("fs");
+          const cfg = JSON.parse(fs.readFileSync("tsconfig.json", "utf8"));
+          delete cfg.compilerOptions.jsxImportSource;
+          fs.writeFileSync("tsconfig.bad.json", JSON.stringify(cfg, null, 2));
+          NODE
+          echo "=== control: same project without jsxImportSource ==="
+          npx tsc -p tsconfig.bad.json --noEmit --pretty false
+          node /tmp/ls-check.mjs "$(pwd)" "$(pwd)/tsconfig.bad.json"
