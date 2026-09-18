@@ -326,11 +326,18 @@ export const Deck: ComponentObject<DeckProps, DeckState> = {
 
 export type DeckOptions = Omit<DeckProps, "slides"> & {
   use?: Plugin[];
+  /** Mount somewhere explicit instead of using #root/body. */
+  host?: Element;
 };
 
-export function deck(slides: SlideComponent[], { use = [], ...opts }: DeckOptions = {}) {
+export function deck(
+  slides: SlideComponent[],
+  { use = [], host: target, ...opts }: DeckOptions = {},
+) {
   const host =
-    document.getElementById("root") ?? document.body.appendChild(document.createElement("div"));
+    target ??
+    document.getElementById("root") ??
+    document.body.appendChild(document.createElement("div"));
   const mounted = render(<Deck slides={slides} {...opts} />, host);
   const self = mounted.comp?.context as DeckRuntime;
 
