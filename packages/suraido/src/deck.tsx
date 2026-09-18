@@ -136,10 +136,9 @@ function syncSteps(root: ParentNode, step: number) {
   }
 }
 
-function SlideAt({ slide: current, step }: { slide: SlideComponent; step: number }) {
+function SlideAt({ slide: current, step }: { slide: SlideComponent; step: number }): VNode {
   scope = { step, counted: 0 };
-  const Current = current;
-  return <Current />;
+  return { type: current, props: {}, key: null };
 }
 
 type DeckProps = { slides: SlideComponent[]; width?: number; height?: number };
@@ -338,7 +337,7 @@ export function deck(
     target ??
     document.getElementById("root") ??
     document.body.appendChild(document.createElement("div"));
-  const mounted = render(<Deck slides={slides} {...opts} />, host);
+  const mounted = render({ type: Deck, props: { slides, ...opts }, key: null }, host);
   const self = mounted.comp?.context as DeckRuntime;
 
   const context: DeckContext = {
