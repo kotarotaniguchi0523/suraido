@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Match repository npm version
+        run: npm install -g npm@12.0.2
+
       - name: Write language-service checker
         shell: bash
         run: |
